@@ -83,6 +83,13 @@ ISTAT_COMUNI_XLSX_URL = (
     "https://www.istat.it/storage/codici-unita-amministrative/Elenco-comuni-italiani.xlsx"
 )
 
+# Fallback web: il server ISTAT può occasionalmente andare in timeout su hosting cloud.
+# Questi mirror contengono un elenco dei Comuni con Regione/Provincia e coordinate WGS84.
+COMUNI_FALLBACK_URLS = (
+    "https://raw.githubusercontent.com/opendatasicilia/comuni-italiani/main/dati/main.csv",
+    "https://cdn.jsdelivr.net/gh/opendatasicilia/comuni-italiani@main/dati/main.csv",
+)
+
 APP_CACHE_DIR = Path.home() / ".generatore_spettri_sismici"
 
 # ============================================================
@@ -23258,9 +23265,9 @@ def haversine_km(lat1, lon1, lat2, lon2):
 
 class MunicipalityDB:
     """
-    Usa esclusivamente Regione/Provincia/Comune dell'elenco ufficiale ISTAT.
-    Le coordinate NON vengono lette dal catalogo dei Comuni: vengono risolte via
-    Nominatim e poi possono essere precisate cliccando la mappa o editando WGS84.
+    Usa Regione/Provincia/Comune dell'elenco ufficiale ISTAT quando disponibile.
+    Su hosting web, se il download ISTAT va in timeout, usa automaticamente un
+    mirror CSV di fallback per mantenere operativo il menu dei Comuni.
     """
     def __init__(self):
         self.rows = []
@@ -23270,33 +23277,59 @@ class MunicipalityDB:
         self._load()
 
     def _ensure_database(self):
-        bundled = resource_path("Elenco-comuni-italiani.xlsx")
-        if bundled.exists():
-            return bundled
+        # 1) File già incluso nel progetto (soluzione migliore se presente).
+        for name in ("Elenco-comuni-italiani.xlsx", "Elenco-comuni-italiani.csv"):
+            bundled = resource_path(name)
+            if bundled.exists() and bundled.stat().st_size > 100_000:
+                return bundled
 
         APP_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        cached = APP_CACHE_DIR / "Elenco-comuni-italiani.xlsx"
-        if cached.exists() and cached.stat().st_size > 100_000:
-            return cached
+        cached_xlsx = APP_CACHE_DIR / "Elenco-comuni-italiani.xlsx"
+        cached_csv = APP_CACHE_DIR / "Elenco-comuni-italiani-fallback.csv"
 
+        if cached_xlsx.exists() and cached_xlsx.stat().st_size > 100_000:
+            return cached_xlsx
+        if cached_csv.exists() and cached_csv.stat().st_size > 100_000:
+            return cached_csv
+
+        errors = []
+
+        # 2) Fonte ISTAT ufficiale.
         req = urllib.request.Request(
             ISTAT_COMUNI_XLSX_URL,
-            headers={"User-Agent": "GiulivoIngegneria-GeneratoreSpettri/3.0"},
+            headers={"User-Agent": "GiulivoIngegneria-GeneratoreSpettri/3.1"},
         )
         try:
-            with urllib.request.urlopen(req, timeout=25) as response:
+            with urllib.request.urlopen(req, timeout=18) as response:
                 content = response.read()
             if len(content) < 100_000:
                 raise RuntimeError("download ISTAT incompleto")
-            cached.write_bytes(content)
-            return cached
+            cached_xlsx.write_bytes(content)
+            return cached_xlsx
         except Exception as exc:
-            raise RuntimeError(
-                "Impossibile scaricare l'elenco ufficiale ISTAT dei Comuni.\n\n"
-                "La connessione Internet serve al primo avvio per il menu dei Comuni; "
-                "il calcolo sismico resta utilizzabile inserendo direttamente le coordinate WGS84.\n\n"
-                f"Dettaglio: {exc}"
+            errors.append(f"ISTAT: {exc}")
+
+        # 3) Mirror CSV: evita che un timeout ISTAT renda inutilizzabile il menu.
+        for url in COMUNI_FALLBACK_URLS:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "GiulivoIngegneria-GeneratoreSpettri-Web/1.1"},
             )
+            try:
+                with urllib.request.urlopen(req, timeout=18) as response:
+                    content = response.read()
+                if len(content) < 100_000:
+                    raise RuntimeError("download elenco Comuni incompleto")
+                cached_csv.write_bytes(content)
+                return cached_csv
+            except Exception as exc:
+                errors.append(f"fallback: {exc}")
+
+        raise RuntimeError(
+            "Impossibile caricare l'elenco dei Comuni. "
+            "Il calcolo resta utilizzabile inserendo direttamente le coordinate WGS84. "
+            "Dettaglio: " + " | ".join(errors)
+        )
 
     @staticmethod
     def _find_header_index(headers, required_words, preferred_words=()):
@@ -23310,72 +23343,110 @@ class MunicipalityDB:
             return None
         return max(candidates)[1]
 
-    def _load(self):
+    def _load_csv_fallback(self):
+        # Il mirror OpenDataSicilia usa UTF-8 e i campi:
+        # comune, pro_com_t, lat, long, den_prov, sigla, den_reg, ...
+        with self.path.open("r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            fields = set(reader.fieldnames or [])
+            required = {"comune", "den_prov", "den_reg"}
+            if not required.issubset(fields):
+                raise RuntimeError("Formato CSV fallback dei Comuni non riconosciuto.")
+            for r in reader:
+                comune = (r.get("comune") or "").strip()
+                provincia = (r.get("den_prov") or "").strip()
+                regione = (r.get("den_reg") or "").strip()
+                if not (comune and provincia and regione):
+                    continue
+                try:
+                    lat = float(r.get("lat")) if r.get("lat") not in (None, "") else None
+                    lon = float(r.get("long")) if r.get("long") not in (None, "") else None
+                except Exception:
+                    lat = lon = None
+                self.rows.append({
+                    "comune": comune,
+                    "provincia": provincia,
+                    "regione": regione,
+                    "istat": (r.get("pro_com_t") or "").strip(),
+                    "lat": lat,
+                    "lon": lon,
+                })
+
+    def _load_xlsx_istat(self):
         try:
             from openpyxl import load_workbook
         except Exception as exc:
             raise RuntimeError(
-                "Per leggere l'elenco ISTAT installare openpyxl:\n\n"
-                "pip install openpyxl\n\n"
+                "Per leggere l'elenco ISTAT installare openpyxl: pip install openpyxl. "
                 f"Dettaglio: {exc}"
             )
 
         wb = load_workbook(self.path, read_only=True, data_only=True)
         loaded = False
-        for ws in wb.worksheets:
-            raw_rows = ws.iter_rows(values_only=True)
-            header = None
-            for _ in range(30):
-                try:
-                    candidate = next(raw_rows)
-                except StopIteration:
+        try:
+            for ws in wb.worksheets:
+                raw_rows = ws.iter_rows(values_only=True)
+                header = None
+                for _ in range(30):
+                    try:
+                        candidate = next(raw_rows)
+                    except StopIteration:
+                        break
+                    norm = [normalize_text(x) for x in candidate]
+                    if any("denominazione regione" in x for x in norm) and any("denominazione" in x and "comune" in x for x in norm):
+                        header = list(candidate)
+                        break
+                    if any("denominazione regione" in x for x in norm) and any("denominazione in italiano" in x for x in norm):
+                        header = list(candidate)
+                        break
+                if header is None:
+                    continue
+
+                i_region = self._find_header_index(header, ["denominazione", "regione"])
+                i_comune = self._find_header_index(header, ["denominazione", "italiano"])
+                if i_comune is None:
+                    i_comune = self._find_header_index(header, ["denominazione"], ["italiana", "straniera"])
+                i_prov = self._find_header_index(header, ["denominazione", "unita", "territoriale", "sovracomunale"])
+                if i_prov is None:
+                    i_prov = self._find_header_index(header, ["denominazione", "provincia"])
+                i_code = self._find_header_index(header, ["codice", "comune"], ["alfanumerico"])
+
+                if i_region is None or i_comune is None or i_prov is None:
+                    continue
+
+                for r in raw_rows:
+                    vals = list(r)
+                    def cell(i):
+                        if i is None or i >= len(vals) or vals[i] is None:
+                            return ""
+                        return str(vals[i]).strip()
+                    row = {
+                        "comune": cell(i_comune),
+                        "provincia": cell(i_prov),
+                        "regione": cell(i_region),
+                        "istat": cell(i_code),
+                        "lat": None,
+                        "lon": None,
+                    }
+                    if row["comune"] and row["provincia"] and row["regione"]:
+                        self.rows.append(row)
+                if self.rows:
+                    loaded = True
                     break
-                norm = [normalize_text(x) for x in candidate]
-                if any("denominazione regione" in x for x in norm) and any("denominazione" in x and "comune" in x for x in norm):
-                    header = list(candidate)
-                    break
-                # Nei file ISTAT recenti il comune è spesso "Denominazione in italiano"
-                if any("denominazione regione" in x for x in norm) and any("denominazione in italiano" in x for x in norm):
-                    header = list(candidate)
-                    break
-            if header is None:
-                continue
-
-            i_region = self._find_header_index(header, ["denominazione", "regione"])
-            i_comune = self._find_header_index(header, ["denominazione", "italiano"])
-            if i_comune is None:
-                i_comune = self._find_header_index(header, ["denominazione"], ["italiana", "straniera"])
-            i_prov = self._find_header_index(header, ["denominazione", "unita", "territoriale", "sovracomunale"])
-            if i_prov is None:
-                i_prov = self._find_header_index(header, ["denominazione", "provincia"])
-            i_code = self._find_header_index(header, ["codice", "comune"], ["alfanumerico"])
-
-            if i_region is None or i_comune is None or i_prov is None:
-                continue
-
-            for r in raw_rows:
-                vals = list(r)
-                def cell(i):
-                    if i is None or i >= len(vals) or vals[i] is None:
-                        return ""
-                    return str(vals[i]).strip()
-                row = {
-                    "comune": cell(i_comune),
-                    "provincia": cell(i_prov),
-                    "regione": cell(i_region),
-                    "istat": cell(i_code),
-                }
-                if row["comune"] and row["provincia"] and row["regione"]:
-                    self.rows.append(row)
-            if self.rows:
-                loaded = True
-                break
-
-        wb.close()
+        finally:
+            wb.close()
         if not loaded:
             raise RuntimeError("Formato dell'elenco ISTAT non riconosciuto.")
 
-        # Deduplica conservando i nomi ufficiali correnti.
+    def _load(self):
+        if self.path.suffix.lower() == ".csv":
+            self._load_csv_fallback()
+        else:
+            self._load_xlsx_istat()
+
+        if not self.rows:
+            raise RuntimeError("Elenco dei Comuni vuoto.")
+
         unique = {}
         for r in self.rows:
             unique[(r["regione"], r["provincia"], r["comune"])] = r
@@ -23407,7 +23478,6 @@ class MunicipalityDB:
                 if nreg in normalize_text(self.rows[i]["regione"]) or normalize_text(self.rows[i]["regione"]) in nreg:
                     return self.rows[i]
         return self.rows[ids[0]]
-
 
 def _near_point(lat, lon, center_lat, center_lon, radius_km):
     return float(haversine_km(lat, lon, np.array([center_lat]), np.array([center_lon]))[0]) <= radius_km

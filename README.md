@@ -41,3 +41,8 @@ In alternativa crea un pulsante WordPress che apre l'URL della web app in una nu
 - La geocodifica utilizza Nominatim/OpenStreetMap.
 - L'altitudine viene recuperata tramite Open-Meteo.
 - Gli export PNG e CSV avvengono direttamente dal browser.
+
+## Aggiornamento V2
+
+- Grafico degli spettri riallineato allo stile della versione desktop originale: SLO/SLD/SLV/SLC con tratteggi distinti, stato limite evidenziato in rosso, assi e titolo completi.
+- Elenco Comuni più robusto su Streamlit Cloud: se il download ISTAT va in timeout viene usato automaticamente un mirror CSV di fallback.

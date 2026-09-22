@@ -227,28 +227,53 @@ def results_table(results):
     return pd.DataFrame(rows)
 
 
-def spectra_figure(results, plot_type, highlight):
-    fig, ax = plt.subplots(figsize=(10, 6))
+def spectra_figure(results, plot_type, highlight, site_name, soil, topo, xi, q):
+    """Grafico con lo stesso stile della versione desktop originale."""
+    fig, ax = plt.subplots(figsize=(8.8, 5.4), dpi=100)
+
     mapping = {
-        "Elastico": ("Se_g", "Accelerazione [g]", "Spettro elastico"),
-        "Progetto": ("Sa_g", "Accelerazione [g]", "Spettro di progetto"),
-        "Spostamento elastico": ("SDe_mm", "Spostamento [mm]", "Spettro di spostamento elastico"),
-        "Spostamento progetto": ("Sd_mm", "Spostamento [mm]", "Spettro di spostamento di progetto"),
+        "Elastico": ("Se_g", r"Accelerazione spettrale $S_e(T)$ / g"),
+        "Progetto": ("Sa_g", r"Accelerazione di progetto $S_a(T)$ / g"),
+        "Spostamento elastico": ("SDe_mm", r"Spostamento spettrale elastico [mm]"),
+        "Spostamento progetto": ("Sd_mm", r"Spostamento spettrale di progetto [mm]"),
     }
-    field, ylabel, title = mapping[plot_type]
+    field, ylabel = mapping[plot_type]
+
+    styles = {
+        "SLO": ":",
+        "SLD": "--",
+        "SLV": "-",
+        "SLC": "-.",
+    }
+
     for st_lim in STATE_ORDER:
         r = results[st_lim]["spectrum"]
-        lw = 3.0 if st_lim == highlight else 1.6
-        alpha = 1.0 if st_lim == highlight else 0.72
-        ax.plot(r["T"], r[field], label=st_lim, linewidth=lw, alpha=alpha)
-    ax.set_xlabel("Periodo T [s]")
-    ax.set_ylabel(ylabel)
-    ax.set_title(title)
-    ax.grid(True, alpha=0.25)
-    ax.legend(ncol=4)
+        is_highlight = st_lim == highlight
+        ax.plot(
+            r["T"],
+            r[field],
+            linestyle=styles[st_lim],
+            linewidth=2.8 if is_highlight else 1.5,
+            color="red" if is_highlight else "black",
+            label=st_lim,
+        )
+
+    ax.set_xlabel("Periodo T [s]", fontweight="bold")
+    ax.set_ylabel(ylabel, fontweight="bold")
+    ax.set_xlim(left=0.0, right=float(results[STATE_ORDER[0]]["spectrum"]["T"][-1]))
+    ax.set_ylim(bottom=0.0)
+    ax.margins(x=0.0, y=0.0)
+    ax.grid(True, alpha=0.30)
+    ax.legend(ncol=4, frameon=False)
+
+    name = (site_name or "Sito personalizzato").strip()
+    ax.set_title(
+        f"{plot_type} - {name} | Suolo {soil} | Topografia {topo} | ξ={xi:g}% | q={q:g}",
+        fontweight="bold",
+    )
+
     fig.tight_layout()
     return fig
-
 
 def hazard_figure(hazard_db, meta, state, tr, radius_km, site_name):
     lon, lat, ag, source = hazard_db.hazard_points(
@@ -356,8 +381,15 @@ with left:
             municipality = st.selectbox("Comune", municipalities)
 
             if st.button("Trova coordinate del Comune", use_container_width=True):
-                with st.spinner(f"Ricerca coordinate di {municipality}…"):
-                    coords = geocode_municipality(municipality, province, region)
+                # Se il database fallback contiene già le coordinate, usale senza
+                # una seconda chiamata Internet; altrimenti ricorri a Nominatim.
+                db_row = municipality_db.get(region, province, municipality)
+                coords = None
+                if db_row and db_row.get("lat") is not None and db_row.get("lon") is not None:
+                    coords = (float(db_row["lat"]), float(db_row["lon"]))
+                else:
+                    with st.spinner(f"Ricerca coordinate di {municipality}…"):
+                        coords = geocode_municipality(municipality, province, region)
                 if coords is None:
                     st.error("Coordinate non risolte in modo affidabile. Inserisci WGS84 manualmente.")
                 else:
@@ -487,7 +519,7 @@ with right:
         st.stop()
 
     with tabs[0]:
-        fig = spectra_figure(results, plot_type, highlight)
+        fig = spectra_figure(results, plot_type, highlight, site_name, soil, topo, xi, q)
         st.pyplot(fig, use_container_width=True)
 
         table = results_table(results)
