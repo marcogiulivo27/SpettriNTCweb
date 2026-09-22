@@ -11,6 +11,7 @@ import re
 import base64
 import zlib
 import hashlib
+import tempfile
 
 import numpy as np
 
@@ -23172,9 +23173,28 @@ def _extract_embedded_resource(filename):
         raw = zlib.decompress(packed)
         if hashlib.sha256(raw).hexdigest() != info["sha256"]:
             raise ValueError("Checksum risorsa interna non valido")
-        tmp = target.with_suffix(target.suffix + ".tmp")
-        tmp.write_bytes(raw)
-        tmp.replace(target)
+        # Usa un file temporaneo univoco: su Streamlit piu sessioni/rerun
+        # possono estrarre la stessa risorsa nello stesso istante. Un nome fisso
+        # (es. logo.png.tmp) crea una race condition e puo causare FileNotFoundError.
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{target.name}.", suffix=".tmp", dir=str(target_dir)
+        )
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(raw)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, target)
+        finally:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except Exception:
+                pass
+
+        if not valid(target):
+            raise ValueError("Risorsa estratta ma checksum finale non valido")
         return target
     except Exception as exc:
         raise RuntimeError(f"Impossibile estrarre la risorsa interna {filename}: {exc}") from exc
