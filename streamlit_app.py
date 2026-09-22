@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import base64
 import urllib.parse
 import urllib.request
 from math import log
@@ -11,6 +12,7 @@ import matplotlib.pyplot as plt
 import matplotlib.tri as mtri
 import numpy as np
 import pandas as pd
+import pydeck as pdk
 import streamlit as st
 from pyproj import Transformer
 
@@ -19,7 +21,6 @@ from spettri_core import (
     CLASS_USE,
     PVR,
     STATE_ORDER,
-    MunicipalityDB,
     SeismicHazardDB,
     calculate_spectrum,
     detect_table2_island_group,
@@ -49,23 +50,25 @@ st.markdown(
 WGS84_TO_ED50 = Transformer.from_crs("EPSG:4326", "EPSG:4230", always_xy=True)
 ED50_TO_WGS84 = Transformer.from_crs("EPSG:4230", "EPSG:4326", always_xy=True)
 
+ITALIAN_REGIONS = [
+    "", "Abruzzo", "Basilicata", "Calabria", "Campania", "Emilia-Romagna",
+    "Friuli-Venezia Giulia", "Lazio", "Liguria", "Lombardia", "Marche",
+    "Molise", "Piemonte", "Puglia", "Sardegna", "Sicilia", "Toscana",
+    "Trentino-Alto Adige", "Umbria", "Valle d'Aosta", "Veneto",
+]
+
 
 @st.cache_resource(show_spinner="Caricamento database sismico…")
 def get_hazard_db() -> SeismicHazardDB:
     return SeismicHazardDB(resource_path("spettri2008.csv"), resource_path("italia_ag_002.npz"))
 
 
-@st.cache_resource(show_spinner="Caricamento elenco ufficiale dei Comuni…")
-def get_municipality_db() -> MunicipalityDB:
-    return MunicipalityDB()
-
-
 @st.cache_data(ttl=86400, show_spinner=False)
-def geocode_municipality(comune: str, provincia: str, regione: str):
-    queries = [
-        f"{comune}, {provincia}, {regione}, Italia",
-        f"{comune}, {regione}, Italia",
-    ]
+def geocode_municipality(comune: str, provincia: str = "", regione: str = ""):
+    parts = [comune.strip(), provincia.strip(), regione.strip(), "Italia"]
+    q_full = ", ".join([x for x in parts if x])
+    q_region = ", ".join([x for x in [comune.strip(), regione.strip(), "Italia"] if x])
+    queries = [q_full, q_region]
     for q in queries:
         params = urllib.parse.urlencode({
             "q": q,
@@ -275,7 +278,49 @@ def spectra_figure(results, plot_type, highlight, site_name, soil, topo, xi, q):
     fig.tight_layout()
     return fig
 
-def hazard_figure(hazard_db, meta, state, tr, radius_km, site_name):
+def _masked_triangulation(lon, lat, max_edge_deg=0.95):
+    triang = mtri.Triangulation(lon, lat)
+    tri = triang.triangles
+    x = np.asarray(lon)
+    y = np.asarray(lat)
+    e01 = np.hypot(x[tri[:, 0]] - x[tri[:, 1]], y[tri[:, 0]] - y[tri[:, 1]])
+    e12 = np.hypot(x[tri[:, 1]] - x[tri[:, 2]], y[tri[:, 1]] - y[tri[:, 2]])
+    e20 = np.hypot(x[tri[:, 2]] - x[tri[:, 0]], y[tri[:, 2]] - y[tri[:, 0]])
+    triang.set_mask(np.maximum.reduce([e01, e12, e20]) > max_edge_deg)
+    return triang
+
+
+def national_hazard_figure(hazard_db, meta, state, tr, site_name):
+    lon, lat, ag, source = hazard_db.national_hazard_points(tr)
+    fig, ax = plt.subplots(figsize=(7.0, 7.2))
+    triang = _masked_triangulation(lon, lat, max_edge_deg=0.95)
+    vmin = float(np.nanpercentile(ag, 1.0))
+    vmax = float(np.nanpercentile(ag, 99.0))
+    if vmax <= vmin:
+        vmax = float(np.nanmax(ag))
+        vmin = float(np.nanmin(ag))
+    levels = np.linspace(vmin, vmax, 18)
+    contour = ax.tricontourf(triang, ag, levels=levels, cmap="turbo", extend="both")
+    try:
+        ax.tricontour(triang, ag, levels=levels[::2], colors="black", linewidths=0.25, alpha=0.30)
+    except Exception:
+        pass
+    ax.scatter([meta["lon_ed50"]], [meta["lat_ed50"]], marker="*", s=180, c="white", edgecolors="black", linewidths=1.0, zorder=10, label="Sito")
+    ax.legend(loc="lower left", frameon=True, fontsize=8)
+    cbar = fig.colorbar(contour, ax=ax, pad=0.02, shrink=0.86)
+    cbar.set_label("ag / g")
+    ax.set_xlim(6.2, 19.2)
+    ax.set_ylim(35.0, 47.7)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel("Longitudine ED50")
+    ax.set_ylabel("Latitudine ED50")
+    ax.grid(True, alpha=0.15)
+    ax.set_title(f"Italia – pericolosità {state} | TR = {tr:.0f} anni", fontweight="bold")
+    fig.tight_layout()
+    return fig, source, (vmin, vmax)
+
+
+def hazard_figure(hazard_db, meta, state, tr, radius_km, site_name, shared_clim=None):
     lon, lat, ag, source = hazard_db.hazard_points(
         meta["lat_ed50"],
         meta["lon_ed50"],
@@ -293,15 +338,19 @@ def hazard_figure(hazard_db, meta, state, tr, radius_km, site_name):
         ax.text(0.02, 0.02, f"ag/g = {ag[0]:.4f}", transform=ax.transAxes)
     else:
         triang = mtri.Triangulation(lon, lat)
-        levels = np.linspace(float(np.nanmin(ag)), float(np.nanmax(ag)), 16)
-        contour = ax.tricontourf(triang, ag, levels=levels, cmap="turbo")
+        if shared_clim is None:
+            vmin, vmax = float(np.nanmin(ag)), float(np.nanmax(ag))
+        else:
+            vmin, vmax = shared_clim
+        levels = np.linspace(vmin, vmax, 18)
+        contour = ax.tricontourf(triang, ag, levels=levels, cmap="turbo", extend="both")
         ax.scatter([meta["lon_ed50"]], [meta["lat_ed50"]], marker="*", s=170, c="black", zorder=10)
         cbar = fig.colorbar(contour, ax=ax, pad=0.02)
         cbar.set_label("ag / g")
     ax.set_xlabel("Longitudine ED50")
     ax.set_ylabel("Latitudine ED50")
     ax.grid(True, alpha=0.2)
-    ax.set_title(f"Pericolosità sismica – {site_name} | {state} | TR = {tr:.0f} anni")
+    ax.set_title(f"Zoom locale – {site_name} | {state} | TR = {tr:.0f} anni", fontweight="bold")
     fig.tight_layout()
     return fig, source
 
@@ -352,13 +401,21 @@ except Exception as exc:
     st.stop()
 
 logo_path = resource_path("logo.png")
-head1, head2 = st.columns([4, 1])
+head1, head2 = st.columns([3.2, 1.8], gap="large", vertical_alignment="center")
 with head1:
     st.title("Generatore di spettri di risposta sismica")
     st.caption("SLO · SLD · SLV · SLC — versione web")
 with head2:
     if Path(logo_path).exists():
-        st.image(str(logo_path), width=220)
+        encoded_logo = base64.b64encode(Path(logo_path).read_bytes()).decode("ascii")
+        html_logo = (
+            '<div style="padding-top:28px;display:flex;justify-content:center;width:100%;">'
+            f'<img src="data:image/png;base64,{encoded_logo}" '
+            'style="display:block;width:min(100%,380px);height:auto;object-fit:contain;" '
+            'alt="Giulivo Ingegneria">'
+            '</div>'
+        )
+        st.markdown(html_logo, unsafe_allow_html=True)
 
 left, right = st.columns([0.95, 1.55], gap="large")
 
@@ -370,38 +427,32 @@ with left:
     selected_municipality = st.session_state.get("municipality_name", "")
 
     if use_municipality:
-        try:
-            municipality_db = get_municipality_db()
-            regions = municipality_db.regions
-            region_idx = regions.index(selected_region) if selected_region in regions else 0
-            region = st.selectbox("Regione", regions, index=region_idx)
-            provinces = municipality_db.provinces(region)
-            province = st.selectbox("Provincia", provinces)
-            municipalities = municipality_db.municipalities(region, province)
-            municipality = st.selectbox("Comune", municipalities)
+        st.caption("Ricerca diretta del Comune: non è più necessario scaricare l'intero elenco ISTAT prima di usare l'app.")
+        comune_q = st.text_input("Comune", value=st.session_state.get("municipality_name", ""), placeholder="es. Napoli")
+        qm1, qm2 = st.columns(2)
+        with qm1:
+            reg_default = st.session_state.get("region_name", "")
+            reg_idx = ITALIAN_REGIONS.index(reg_default) if reg_default in ITALIAN_REGIONS else 0
+            regione_q = st.selectbox("Regione (facoltativa)", ITALIAN_REGIONS, index=reg_idx)
+        with qm2:
+            provincia_q = st.text_input("Provincia (facoltativa)", placeholder="es. Napoli")
 
-            if st.button("Trova coordinate del Comune", use_container_width=True):
-                # Se il database fallback contiene già le coordinate, usale senza
-                # una seconda chiamata Internet; altrimenti ricorri a Nominatim.
-                db_row = municipality_db.get(region, province, municipality)
-                coords = None
-                if db_row and db_row.get("lat") is not None and db_row.get("lon") is not None:
-                    coords = (float(db_row["lat"]), float(db_row["lon"]))
-                else:
-                    with st.spinner(f"Ricerca coordinate di {municipality}…"):
-                        coords = geocode_municipality(municipality, province, region)
+        if st.button("Trova Comune", use_container_width=True):
+            if not comune_q.strip():
+                st.warning("Inserisci il nome del Comune.")
+            else:
+                with st.spinner(f"Ricerca coordinate di {comune_q.strip()}…"):
+                    coords = geocode_municipality(comune_q.strip(), provincia_q.strip(), regione_q.strip())
                 if coords is None:
-                    st.error("Coordinate non risolte in modo affidabile. Inserisci WGS84 manualmente.")
+                    st.error("Comune non risolto in modo affidabile. Prova ad aggiungere Regione/Provincia oppure usa WGS84 manualmente.")
                 else:
                     st.session_state["lat_wgs"], st.session_state["lon_wgs"] = coords
                     st.session_state["lat_wgs_input"], st.session_state["lon_wgs_input"] = coords
-                    st.session_state["site_name"] = municipality
-                    st.session_state["site_name_input"] = municipality
-                    st.session_state["region_name"] = region
-                    st.session_state["municipality_name"] = municipality
+                    st.session_state["site_name"] = comune_q.strip()
+                    st.session_state["site_name_input"] = comune_q.strip()
+                    st.session_state["region_name"] = regione_q.strip()
+                    st.session_state["municipality_name"] = comune_q.strip()
                     st.rerun()
-        except Exception as exc:
-            st.warning(f"Elenco Comuni non disponibile: {exc}. Puoi usare le coordinate manuali.")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -558,14 +609,81 @@ with right:
         )
 
     with tabs[1]:
-        map_df = pd.DataFrame({"lat": [lat_wgs], "lon": [lon_wgs]})
-        st.map(map_df, latitude="lat", longitude="lon", zoom=12, use_container_width=True)
-        encoded = urllib.parse.quote(f"{lat_wgs:.8f},{lon_wgs:.8f}")
-        st.markdown(
-            f"[Apri in Google Maps](https://www.google.com/maps/search/?api=1&query={encoded}) · "
-            f"[Apri in Google Earth](https://earth.google.com/web/search/{encoded})"
+        # Mappa interattiva centrata esattamente sulle coordinate WGS84 del sito.
+        # PyDeck rende il punto molto più leggibile del semplice st.map.
+        map_df = pd.DataFrame({
+            "lat": [lat_wgs],
+            "lon": [lon_wgs],
+            "sito": [site_name or "Sito"],
+        })
+        halo_layer = pdk.Layer(
+            "ScatterplotLayer",
+            data=map_df,
+            get_position="[lon, lat]",
+            get_radius=125,
+            radius_min_pixels=13,
+            radius_max_pixels=24,
+            get_fill_color=[0, 190, 120, 55],
+            pickable=False,
         )
-        st.caption("La posizione esatta dell'opera può essere affinata modificando le coordinate WGS84.")
+        site_layer = pdk.Layer(
+            "ScatterplotLayer",
+            data=map_df,
+            get_position="[lon, lat]",
+            get_radius=60,
+            radius_min_pixels=7,
+            radius_max_pixels=13,
+            get_fill_color=[0, 185, 115, 235],
+            get_line_color=[255, 255, 255, 255],
+            pickable=True,
+            stroked=True,
+            filled=True,
+            line_width_min_pixels=3,
+        )
+        label_layer = pdk.Layer(
+            "TextLayer",
+            data=map_df,
+            get_position="[lon, lat]",
+            get_text="sito",
+            get_size=16,
+            get_color=[20, 20, 20, 255],
+            get_alignment_baseline="bottom",
+            get_pixel_offset=[0, -18],
+            pickable=False,
+        )
+        deck = pdk.Deck(
+            map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+            initial_view_state=pdk.ViewState(
+                latitude=float(lat_wgs),
+                longitude=float(lon_wgs),
+                zoom=14.0,
+                pitch=0,
+            ),
+            layers=[halo_layer, site_layer, label_layer],
+            tooltip={"text": "{sito}\nLat: {lat}\nLon: {lon}"},
+        )
+        st.pydeck_chart(deck, use_container_width=True, height=520)
+
+        m1, m2, m3 = st.columns([1, 1, 1.4])
+        encoded = urllib.parse.quote(f"{lat_wgs:.8f},{lon_wgs:.8f}")
+        with m1:
+            st.link_button(
+                "Google Maps",
+                f"https://www.google.com/maps/search/?api=1&query={encoded}",
+                use_container_width=True,
+            )
+        with m2:
+            st.link_button(
+                "Google Earth",
+                f"https://earth.google.com/web/search/{encoded}",
+                use_container_width=True,
+            )
+        with m3:
+            st.caption(f"WGS84: {lat_wgs:.7f}, {lon_wgs:.7f}")
+        st.caption(
+            "Mappa del sito centrata sulle coordinate WGS84. Per affinare il punto dell'opera "
+            "modifica direttamente latitudine e longitudine; la mappa si aggiorna automaticamente."
+        )
 
     with tabs[2]:
         h1, h2 = st.columns(2)
@@ -575,10 +693,24 @@ with right:
             radius = st.number_input("Raggio [km]", min_value=20.0, max_value=250.0, value=90.0, step=10.0)
         tr_for_map = float(hazard_df.loc[hazard_df["SL"] == hazard_state, "Tr [anni]"].iloc[0])
         try:
-            hfig, hsource = hazard_figure(hazard_db, meta, hazard_state, tr_for_map, radius, site_name)
-            st.pyplot(hfig, use_container_width=True)
-            st.caption(hsource)
+            nfig, nsource, clim = national_hazard_figure(
+                hazard_db, meta, hazard_state, tr_for_map, site_name
+            )
+            hfig, hsource = hazard_figure(
+                hazard_db, meta, hazard_state, tr_for_map, radius, site_name, shared_clim=clim
+            )
+            p1, p2 = st.columns(2, gap="large")
+            with p1:
+                st.pyplot(nfig, use_container_width=True)
+                st.caption("Vista nazionale – reticolo NTC. La stella identifica il sito selezionato.")
+            with p2:
+                st.pyplot(hfig, use_container_width=True)
+                st.caption(f"Zoom locale ({radius:.0f} km) – {hsource}")
+            plt.close(nfig)
             plt.close(hfig)
+            st.caption(
+                "Le due mappe usano la stessa scala cromatica ag/g, così la vista locale è confrontabile con il quadro nazionale."
+            )
         except Exception as exc:
             st.warning(f"Mappa di pericolosità non disponibile: {exc}")
 

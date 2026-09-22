@@ -46,3 +46,12 @@ In alternativa crea un pulsante WordPress che apre l'URL della web app in una nu
 
 - Grafico degli spettri riallineato allo stile della versione desktop originale: SLO/SLD/SLV/SLC con tratteggi distinti, stato limite evidenziato in rosso, assi e titolo completi.
 - Elenco Comuni più robusto su Streamlit Cloud: se il download ISTAT va in timeout viene usato automaticamente un mirror CSV di fallback.
+
+
+## Aggiornamento V5
+
+- Ricerca Comune immediata: non viene più scaricato l'intero elenco ISTAT prima di usare l'app; si cerca direttamente Comune/Regione/Provincia e si aggiornano le coordinate WGS84.
+- Logo Giulivo Ingegneria reso responsive e spostato leggermente più in basso, senza tagli.
+- Scheda Pericolosità: vista nazionale dell'Italia + zoom locale del sito affiancati.
+- Vista nazionale e zoom locale usano la stessa scala cromatica ag/g per un confronto diretto.
+- La vista nazionale usa il reticolo NTC completo; lo zoom locale mantiene la griglia ad alta risoluzione quando disponibile.

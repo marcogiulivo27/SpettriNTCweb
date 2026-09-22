@@ -23294,13 +23294,33 @@ class MunicipalityDB:
 
         errors = []
 
-        # 2) Fonte ISTAT ufficiale.
+        # 2) Hosting web: prova per primi i mirror CSV, molto più rapidi di ISTAT
+        # e già completi di coordinate WGS84. Questo evita di attendere il timeout
+        # del server ISTAT ad ogni cold start di Streamlit.
+        mirror_urls = (COMUNI_FALLBACK_URLS[1], COMUNI_FALLBACK_URLS[0])
+        for url in mirror_urls:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "GiulivoIngegneria-GeneratoreSpettri-Web/1.2"},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=2.5) as response:
+                    content = response.read()
+                if len(content) < 100_000:
+                    raise RuntimeError("download elenco Comuni incompleto")
+                cached_csv.write_bytes(content)
+                return cached_csv
+            except Exception as exc:
+                errors.append(f"mirror: {exc}")
+
+        # 3) Fonte ISTAT ufficiale come fallback. Timeout volutamente breve sul web:
+        # il calcolo sismico deve restare reattivo anche se il servizio ISTAT è lento.
         req = urllib.request.Request(
             ISTAT_COMUNI_XLSX_URL,
-            headers={"User-Agent": "GiulivoIngegneria-GeneratoreSpettri/3.1"},
+            headers={"User-Agent": "GiulivoIngegneria-GeneratoreSpettri/3.2"},
         )
         try:
-            with urllib.request.urlopen(req, timeout=18) as response:
+            with urllib.request.urlopen(req, timeout=3) as response:
                 content = response.read()
             if len(content) < 100_000:
                 raise RuntimeError("download ISTAT incompleto")
@@ -23308,22 +23328,6 @@ class MunicipalityDB:
             return cached_xlsx
         except Exception as exc:
             errors.append(f"ISTAT: {exc}")
-
-        # 3) Mirror CSV: evita che un timeout ISTAT renda inutilizzabile il menu.
-        for url in COMUNI_FALLBACK_URLS:
-            req = urllib.request.Request(
-                url,
-                headers={"User-Agent": "GiulivoIngegneria-GeneratoreSpettri-Web/1.1"},
-            )
-            try:
-                with urllib.request.urlopen(req, timeout=18) as response:
-                    content = response.read()
-                if len(content) < 100_000:
-                    raise RuntimeError("download elenco Comuni incompleto")
-                cached_csv.write_bytes(content)
-                return cached_csv
-            except Exception as exc:
-                errors.append(f"fallback: {exc}")
 
         raise RuntimeError(
             "Impossibile caricare l'elenco dei Comuni. "
@@ -23737,6 +23741,19 @@ class SeismicHazardDB:
             "node_distances_km": [float(x) for x in distances[vertices]],
             "source": "Reticolo NTC - Allegato B Tabella 1",
         }
+
+    def national_hazard_points(self, tr):
+        """Restituisce i nodi del reticolo NTC sull'intero territorio per una mappa nazionale.
+
+        Si usa volutamente il reticolo NTC principale (circa 10 mila nodi), anche per
+        TR=475 anni, per mantenere la mappa nazionale rapida sul web. La mappa locale
+        continua invece a usare, quando disponibile, la griglia INGV 0.02° ad alta
+        risoluzione.
+        """
+        tr = self._bounded_tr(tr)
+        idx = np.arange(len(self.lon), dtype=int)
+        ag_g = self._node_values(idx, tr, "ag") / 10.0
+        return self.lon.copy(), self.lat.copy(), ag_g, "Reticolo NTC - Allegato B Tabella 1"
 
     def hazard_points(self, lat_ed50, lon_ed50, tr, radius_km=90.0, table2_group=None):
         tr = self._bounded_tr(tr)
