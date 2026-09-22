@@ -369,6 +369,17 @@ def _apply_tnr_style():
     })
 
 
+def _apply_tnr_style():
+    return plt.rc_context({
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+        "axes.titlesize": 14,
+        "axes.labelsize": 11,
+        "xtick.labelsize": 9.5,
+        "ytick.labelsize": 9.5,
+    })
+
+
 def combined_hazard_figure(hazard_db, meta, state, tr, radius_km, site_name):
     n_lon, n_lat, n_ag, nsource = hazard_db.national_hazard_points(tr)
     l_lon, l_lat, l_ag, lsource = hazard_db.hazard_points(
@@ -391,70 +402,79 @@ def combined_hazard_figure(hazard_db, meta, state, tr, radius_km, site_name):
     cmap = "YlOrRd"
 
     with _apply_tnr_style():
-        fig = plt.figure(figsize=(11.0, 8.0), facecolor="white")
-        ax = fig.add_axes([0.07, 0.09, 0.80, 0.83])
+        fig = plt.figure(figsize=(10.8, 8.8), facecolor="white")
+        ax = fig.add_axes([0.08, 0.14, 0.67, 0.79])
         ax.set_facecolor("#fbfbf8")
 
         triang = _masked_triangulation(n_lon, n_lat, max_edge_deg=0.85)
         cf = ax.tricontourf(triang, n_ag, levels=levels, cmap=cmap, extend="both")
         try:
-            ax.tricontour(triang, n_ag, levels=levels, colors="#5a4a42", linewidths=0.55, alpha=0.70)
+            ax.tricontour(triang, n_ag, levels=levels, colors="#6a5d52", linewidths=0.55, alpha=0.70)
         except Exception:
             pass
 
-        # sito e area di zoom
         site_x = float(meta["lon_ed50"])
         site_y = float(meta["lat_ed50"])
         dlat = float(radius_km) / 111.0
         dlon = float(radius_km) / max(20.0, 111.0 * np.cos(np.radians(site_y)))
         rdeg = max(dlat, dlon) * 0.70
+
         ax.scatter([site_x], [site_y], marker="*", s=180, c="black", edgecolors="white", linewidths=0.9, zorder=15)
-        ax.add_patch(Circle((site_x, site_y), radius=rdeg, fill=False, ec="#1f1f1f", lw=1.4, ls="--", zorder=12))
-        ax.text(site_x + 0.15, site_y + 0.15, (site_name or "Sito"), fontsize=9.5, fontweight="bold", color="black", zorder=16)
+        ax.add_patch(Circle((site_x, site_y), radius=rdeg, fill=False, ec="#222222", lw=1.3, ls="--", zorder=12))
+        ax.text(site_x + 0.12, site_y + 0.12, (site_name or "Sito"), fontsize=9.5, fontweight="bold", color="black", zorder=16)
 
         ax.set_xlim(6.2, 19.2)
         ax.set_ylim(35.0, 47.7)
         ax.set_aspect("equal", adjustable="box")
-        ax.set_xlabel("Longitudine ED50 [°]", fontweight="bold")
-        ax.set_ylabel("Latitudine ED50 [°]", fontweight="bold")
-        ax.grid(True, color="#8a8a8a", alpha=0.18, linewidth=0.4)
+        ax.set_xlabel("Longitudine ED50 [°]", fontweight="bold", labelpad=6)
+        ax.set_ylabel("Latitudine ED50 [°]", fontweight="bold", labelpad=8)
+        ax.grid(True, color="#8a8a8a", alpha=0.16, linewidth=0.4)
         ax.set_title(
-            f"Pericolosità sismica in Italia – {state}  |  TR = {tr:.0f} anni",
+            f"Pericolosità sismica in Italia - {state}  |  TR = {tr:.0f} anni",
             fontweight="bold",
             pad=12,
         )
 
-        # inset zoom locale dentro la stessa area grafica
-        axins = inset_axes(ax, width="37%", height="37%", loc="lower left", borderpad=1.25)
+        # inset locale: ben separato e senza sovrapposizioni con titolo/assi principali
+        axins = inset_axes(ax, width="37%", height="37%", loc="lower left", borderpad=1.35)
         axins.set_facecolor("white")
         if len(l_ag) >= 4 and np.nanmax(l_ag) - np.nanmin(l_ag) > 1e-10:
             local_triang = mtri.Triangulation(l_lon, l_lat)
             axins.tricontourf(local_triang, l_ag, levels=levels, cmap=cmap, extend="both")
             try:
-                axins.tricontour(local_triang, l_ag, levels=levels, colors="#5a4a42", linewidths=0.45, alpha=0.70)
+                axins.tricontour(local_triang, l_ag, levels=levels, colors="#6a5d52", linewidths=0.40, alpha=0.70)
             except Exception:
                 pass
         else:
-            axins.scatter(l_lon, l_lat, c=l_ag, cmap=cmap, vmin=vmin, vmax=vmax, s=28)
+            axins.scatter(l_lon, l_lat, c=l_ag, cmap=cmap, vmin=vmin, vmax=vmax, s=26)
         axins.scatter([site_x], [site_y], marker="*", s=120, c="black", edgecolors="white", linewidths=0.8, zorder=10)
         axins.set_xlim(site_x - dlon, site_x + dlon)
         axins.set_ylim(site_y - dlat, site_y + dlat)
-        axins.grid(True, color="#8a8a8a", alpha=0.16, linewidth=0.35)
         axins.set_title("Zoom locale", fontsize=10.5, fontweight="bold", pad=4)
-        axins.tick_params(labelsize=8)
+        axins.grid(True, color="#8a8a8a", alpha=0.14, linewidth=0.35)
+        axins.tick_params(labelsize=8, pad=1)
         for spine in axins.spines.values():
-            spine.set_linewidth(1.2)
+            spine.set_linewidth(1.1)
             spine.set_color("#222222")
 
-        cax = fig.add_axes([0.895, 0.16, 0.024, 0.66])
+        cax = fig.add_axes([0.84, 0.23, 0.026, 0.58])
         cb = fig.colorbar(cf, cax=cax)
         cb.set_label("ag / g", fontweight="bold")
 
-        fig.text(
-            0.07, 0.035,
-            f"Vista nazionale: {nsource}   |   Vista locale: {lsource}   |   La circonferenza indica l'area di zoom locale.",
-            fontsize=9.2,
+        # box descrittivo a destra in stile tavola tecnica
+        info_ax = fig.add_axes([0.885, 0.18, 0.10, 0.18])
+        info_ax.axis("off")
+        info_text = (
+            "Vista nazionale\n"
+            f"{nsource}\n\n"
+            "Zoom locale\n"
+            f"{lsource}\n\n"
+            "La circonferenza\n"
+            "indica l'area\n"
+            "inquadrata nello zoom."
         )
+        info_ax.text(0.0, 1.0, info_text, va="top", ha="left", fontsize=8.7)
+
         return fig, nsource, lsource
 
 
@@ -802,7 +822,7 @@ with right:
             st.pyplot(hfig, use_container_width=True)
             plt.close(hfig)
             st.caption(
-                "Mappa composita in stile relazione: quadro nazionale della pericolosità sismica, sagoma del territorio ricostruita dal reticolo NTC, e zoom locale inserito direttamente nella stessa tavola grafica."
+                f"Mappa composita in stile relazione tecnica. Vista nazionale: {nsource}. Zoom locale: {lsource}. Il cerchio sulla carta nazionale individua l'area mostrata nell'inset locale."
             )
         except Exception as exc:
             st.warning(f"Mappa di pericolosità non disponibile: {exc}")
