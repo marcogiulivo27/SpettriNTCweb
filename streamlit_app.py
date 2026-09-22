@@ -11,6 +11,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import matplotlib.tri as mtri
 from matplotlib.patches import Circle
+from matplotlib.colors import ListedColormap, BoundaryNorm
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 import numpy as np
 import pandas as pd
@@ -380,6 +381,17 @@ def _apply_tnr_style():
     })
 
 
+def _apply_tnr_style():
+    return plt.rc_context({
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+        "axes.titlesize": 14,
+        "axes.labelsize": 11,
+        "xtick.labelsize": 9.5,
+        "ytick.labelsize": 9.5,
+    })
+
+
 def combined_hazard_figure(hazard_db, meta, state, tr, radius_km, site_name):
     n_lon, n_lat, n_ag, nsource = hazard_db.national_hazard_points(tr)
     l_lon, l_lat, l_ag, lsource = hazard_db.hazard_points(
@@ -390,26 +402,35 @@ def combined_hazard_figure(hazard_db, meta, state, tr, radius_km, site_name):
         table2_group=meta["table2_group"],
     )
 
-    all_ag = np.concatenate([np.asarray(n_ag, dtype=float).ravel(), np.asarray(l_ag, dtype=float).ravel()])
-    vmin = float(np.nanpercentile(all_ag, 2.0))
-    vmax = float(np.nanpercentile(all_ag, 98.5))
-    if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
-        vmin = float(np.nanmin(all_ag))
-        vmax = float(np.nanmax(all_ag))
-        if vmax <= vmin:
-            vmax = vmin + 1e-4
-    levels = np.linspace(vmin, vmax, 9)
-    cmap = "YlOrRd"
+    # Palette ispirata alle mappe INGV
+    levels = np.array([0.025, 0.050, 0.075, 0.100, 0.125, 0.150, 0.175, 0.200, 0.225, 0.250, 0.275, 0.300])
+    colors = [
+        "#d7d7d7",  # grigio
+        "#c7e6f2",  # azzurro chiaro
+        "#8fd0e8",  # azzurro
+        "#72c768",  # verde
+        "#b7df78",  # verde chiaro
+        "#f0dd57",  # giallo
+        "#f5bf4b",  # giallo-arancio
+        "#ef8a34",  # arancio
+        "#ea4d2e",  # rosso-arancio
+        "#d61f27",  # rosso
+        "#8d61c2",  # viola
+    ]
+    cmap = ListedColormap(colors)
+    cmap.set_under("#efefef")
+    cmap.set_over("#7b49b2")
+    norm = BoundaryNorm(levels, cmap.N)
 
     with _apply_tnr_style():
-        fig = plt.figure(figsize=(10.8, 8.8), facecolor="white")
-        ax = fig.add_axes([0.08, 0.14, 0.67, 0.79])
+        fig = plt.figure(figsize=(11.0, 8.6), facecolor="white")
+        ax = fig.add_axes([0.08, 0.12, 0.64, 0.80])
         ax.set_facecolor("#fbfbf8")
 
         triang = _masked_triangulation(n_lon, n_lat, max_edge_deg=0.85)
-        cf = ax.tricontourf(triang, n_ag, levels=levels, cmap=cmap, extend="both")
+        cf = ax.tricontourf(triang, n_ag, levels=levels, cmap=cmap, norm=norm, extend="both")
         try:
-            ax.tricontour(triang, n_ag, levels=levels, colors="#6a5d52", linewidths=0.55, alpha=0.70)
+            ax.tricontour(triang, n_ag, levels=levels, colors="#555555", linewidths=0.45, alpha=0.55)
         except Exception:
             pass
 
@@ -419,62 +440,52 @@ def combined_hazard_figure(hazard_db, meta, state, tr, radius_km, site_name):
         dlon = float(radius_km) / max(20.0, 111.0 * np.cos(np.radians(site_y)))
         rdeg = max(dlat, dlon) * 0.70
 
-        ax.scatter([site_x], [site_y], marker="*", s=180, c="black", edgecolors="white", linewidths=0.9, zorder=15)
-        ax.add_patch(Circle((site_x, site_y), radius=rdeg, fill=False, ec="#222222", lw=1.3, ls="--", zorder=12))
-        ax.text(site_x + 0.12, site_y + 0.12, (site_name or "Sito"), fontsize=9.5, fontweight="bold", color="black", zorder=16)
+        ax.scatter([site_x], [site_y], marker="*", s=190, c="white", edgecolors="black", linewidths=1.0, zorder=15)
+        ax.add_patch(Circle((site_x, site_y), radius=rdeg, fill=False, ec="#222222", lw=1.2, ls="--", zorder=12))
+        ax.text(site_x + 0.10, site_y + 0.12, (site_name or "Sito"), fontsize=10.0, fontweight="bold", color="black", zorder=16)
 
         ax.set_xlim(6.2, 19.2)
         ax.set_ylim(35.0, 47.7)
         ax.set_aspect("equal", adjustable="box")
         ax.set_xlabel("Longitudine ED50 [°]", fontweight="bold", labelpad=6)
         ax.set_ylabel("Latitudine ED50 [°]", fontweight="bold", labelpad=8)
-        ax.grid(True, color="#8a8a8a", alpha=0.16, linewidth=0.4)
+        ax.grid(True, color="#7f7f7f", alpha=0.12, linewidth=0.35)
         ax.set_title(
             f"Pericolosità sismica in Italia - {state}  |  TR = {tr:.0f} anni",
             fontweight="bold",
             pad=12,
         )
 
-        # inset locale: ben separato e senza sovrapposizioni con titolo/assi principali
-        axins = inset_axes(ax, width="37%", height="37%", loc="lower left", borderpad=1.35)
+        # Zoom locale: inset pulito, senza etichette assi che interferiscono
+        axins = inset_axes(ax, width="34%", height="36%", loc="lower left", borderpad=1.2)
         axins.set_facecolor("white")
         if len(l_ag) >= 4 and np.nanmax(l_ag) - np.nanmin(l_ag) > 1e-10:
             local_triang = mtri.Triangulation(l_lon, l_lat)
-            axins.tricontourf(local_triang, l_ag, levels=levels, cmap=cmap, extend="both")
+            axins.tricontourf(local_triang, l_ag, levels=levels, cmap=cmap, norm=norm, extend="both")
             try:
-                axins.tricontour(local_triang, l_ag, levels=levels, colors="#6a5d52", linewidths=0.40, alpha=0.70)
+                axins.tricontour(local_triang, l_ag, levels=levels, colors="#555555", linewidths=0.35, alpha=0.50)
             except Exception:
                 pass
         else:
-            axins.scatter(l_lon, l_lat, c=l_ag, cmap=cmap, vmin=vmin, vmax=vmax, s=26)
-        axins.scatter([site_x], [site_y], marker="*", s=120, c="black", edgecolors="white", linewidths=0.8, zorder=10)
+            axins.scatter(l_lon, l_lat, c=l_ag, cmap=cmap, norm=norm, s=26)
+        axins.scatter([site_x], [site_y], marker="*", s=110, c="white", edgecolors="black", linewidths=0.9, zorder=10)
         axins.set_xlim(site_x - dlon, site_x + dlon)
         axins.set_ylim(site_y - dlat, site_y + dlat)
         axins.set_title("Zoom locale", fontsize=10.5, fontweight="bold", pad=4)
-        axins.grid(True, color="#8a8a8a", alpha=0.14, linewidth=0.35)
-        axins.tick_params(labelsize=8, pad=1)
+        axins.grid(True, color="#7f7f7f", alpha=0.12, linewidth=0.30)
+        axins.set_xticks([])
+        axins.set_yticks([])
+        axins.tick_params(bottom=False, left=False, labelbottom=False, labelleft=False)
         for spine in axins.spines.values():
             spine.set_linewidth(1.1)
             spine.set_color("#222222")
 
-        cax = fig.add_axes([0.84, 0.23, 0.026, 0.58])
-        cb = fig.colorbar(cf, cax=cax)
+        cax = fig.add_axes([0.77, 0.24, 0.024, 0.56])
+        cb = fig.colorbar(cf, cax=cax, ticks=levels[:-1])
         cb.set_label("ag / g", fontweight="bold")
+        cb.ax.tick_params(labelsize=9)
 
-        # box descrittivo a destra in stile tavola tecnica
-        info_ax = fig.add_axes([0.885, 0.18, 0.10, 0.18])
-        info_ax.axis("off")
-        info_text = (
-            "Vista nazionale\n"
-            f"{nsource}\n\n"
-            "Zoom locale\n"
-            f"{lsource}\n\n"
-            "La circonferenza\n"
-            "indica l'area\n"
-            "inquadrata nello zoom."
-        )
-        info_ax.text(0.0, 1.0, info_text, va="top", ha="left", fontsize=8.7)
-
+        # Nessun box testuale aggiuntivo: la sola colorbar resta pulita e leggibile
         return fig, nsource, lsource
 
 
@@ -822,7 +833,7 @@ with right:
             st.pyplot(hfig, use_container_width=True)
             plt.close(hfig)
             st.caption(
-                f"Mappa composita in stile relazione tecnica. Vista nazionale: {nsource}. Zoom locale: {lsource}. Il cerchio sulla carta nazionale individua l'area mostrata nell'inset locale."
+                f"Mappa di pericolosità in stile tecnico con palette cromatica ispirata alle tavole INGV. Il cerchio sulla carta nazionale individua l'area rappresentata nello zoom locale."
             )
         except Exception as exc:
             st.warning(f"Mappa di pericolosità non disponibile: {exc}")
