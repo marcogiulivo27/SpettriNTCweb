@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import io
+import csv
+import difflib
+import re
+import unicodedata
 import json
 import base64
 import urllib.parse
@@ -69,150 +73,138 @@ def get_hazard_db() -> SeismicHazardDB:
     return SeismicHazardDB(resource_path("spettri2008.csv"), resource_path("italia_ag_002.npz"))
 
 
-# Geocodifica dei Comuni: un'unica interrogazione Nominatim per click;
-# fallback Photon; i fallimenti NON vengono conservati in cache.
-# Per un traffico elevato, preferire un archivio locale delle coordinate comunali.
-GEO_USER_AGENT = "GiulivoIngegneria-Spettri/1.1 (https://giulivoingegneria.it)"
+# Ricerca Comuni: archivio locale, senza Nominatim/Photon.
+# Fonte: RP92/comuni-italiani (dati ISTAT + Garda Informatica), CC BY 4.0.
+# Inserire 'comuni.csv' nella root del repository per garantire
+# funzionamento totalmente offline della ricerca. Se assente, il file viene
+# scaricato UNA SOLA VOLTA da GitHub e memorizzato nella cache Streamlit.
+# Le coordinate sono comunali indicative, NON quelle esatte del sito di progetto.
+COMUNI_CSV_URL = (
+    "https://raw.githubusercontent.com/RP92/comuni-italiani/main/data/comuni.csv"
+)
+COMUNI_MIRROR_URL = (
+    "https://cdn.jsdelivr.net/gh/RP92/comuni-italiani@main/data/comuni.csv"
+)
 
 
-@st.cache_resource(show_spinner=False)
-def _nominatim_gate():
-    # Un solo limite per le sessioni che condividono questa istanza Streamlit.
-    return {"lock": threading.Lock(), "last_call": 0.0}
+def _normalize_comune(value: str) -> str:
+    value = unicodedata.normalize("NFKD", str(value or "").casefold())
+    value = "".join(ch for ch in value if not unicodedata.combining(ch))
+    return re.sub(r"[^a-z0-9]+", " ", value).strip()
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def geocode_municipality(comune: str, provincia: str = "", regione: str = ""):
-    comune = (comune or "").strip()
-    provincia = (provincia or "").strip()
-    regione = (regione or "").strip()
-    if not comune:
-        raise ValueError("Inserire il nome di un Comune.")
-
-    ncom = normalize_text(comune)
-    nprov = normalize_text(provincia)
-    nreg = normalize_text(regione)
-
-    def _read_json(url: str, timeout: int = 7):
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": GEO_USER_AGENT,
-                "Referer": "https://giulivoingegneria.it/",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-
-    def _score(label: str, fields: list[str], typ: str = ""):
-        label_n = normalize_text(label)
-        fields_n = [normalize_text(x) for x in fields if x]
-        score = 0
-        if any(x == ncom for x in fields_n):
-            score += 12
-        elif any(ncom in x or x in ncom for x in fields_n):
-            score += 8
-        elif ncom in label_n:
-            score += 5
-        if nprov:
-            if any(nprov == x for x in fields_n):
-                score += 4
-            elif any(nprov in x or x in nprov for x in fields_n) or nprov in label_n:
-                score += 2
-        if nreg:
-            if any(nreg == x for x in fields_n):
-                score += 5
-            elif any(nreg in x or x in nreg for x in fields_n) or nreg in label_n:
-                score += 3
-        if normalize_text(typ) in {
-            "administrative", "city", "town", "village", "municipality", "hamlet"
-        }:
-            score += 2
-        return score
-
-    # Non ripetere lo stesso toponimo (es. Napoli, Napoli, Campania).
-    parts = []
-    for part in (comune, provincia, regione, "Italia"):
-        if part and normalize_text(part) not in [normalize_text(x) for x in parts]:
-            parts.append(part)
-    query = ", ".join(parts)
-    candidates = []
-    issues = []
-
-    # Nominatim: un'unica richiesta, con spaziatura di almeno 1.1 s fra
-    # le richieste dell'intera istanza Streamlit, come richiesto dalla policy OSM.
-    params = urllib.parse.urlencode({
-        "q": query,
-        "format": "jsonv2",
-        "limit": 10,
-        "countrycodes": "it",
-        "addressdetails": 1,
-        "namedetails": 1,
-        "accept-language": "it",
-    })
-    try:
-        gate = _nominatim_gate()
-        with gate["lock"]:
-            elapsed = time.monotonic() - gate["last_call"]
-            if elapsed < 1.1:
-                time.sleep(1.1 - elapsed)
-            gate["last_call"] = time.monotonic()
-            data = _read_json(f"https://nominatim.openstreetmap.org/search?{params}")
-        for item in data or []:
-            addr = item.get("address") or {}
-            fields = [
-                addr.get("city"), addr.get("town"), addr.get("village"),
-                addr.get("municipality"), addr.get("county"),
-                addr.get("province"), addr.get("state"),
-                item.get("display_name"), item.get("name"),
-            ]
-            score = _score(item.get("display_name", ""), fields, item.get("type", ""))
-            if score >= 4:
-                candidates.append((score, float(item["lat"]), float(item["lon"])))
-    except Exception as exc:
-        logging.exception("Nominatim: ricerca del Comune %s non riuscita", comune)
-        issues.append(f"Nominatim: {type(exc).__name__}: {exc}")
-
-    # Photon viene interrogato SOLO quando la prima ricerca non ha fornito
-    # un candidato: massimo una richiesta per click, senza raffiche di query.
-    if not candidates:
-        params = urllib.parse.urlencode({"q": query, "limit": 8, "lang": "it"})
+def _parse_comuni_csv(content: str, min_count: int = 7000) -> tuple[dict, ...]:
+    reader = csv.DictReader(io.StringIO(content.lstrip("\ufeff")))
+    required = {"nome", "regione.nome", "provincia.nome", "provincia.sigla",
+                "coordinate.lat", "coordinate.lng"}
+    if not required.issubset(reader.fieldnames or []):
+        raise ValueError("Formato archivio Comuni non valido.")
+    comuni = []
+    for r in reader:
         try:
-            data = _read_json(f"https://photon.komoot.io/api/?{params}")
-            for feat in (data.get("features") or []):
-                props = feat.get("properties") or {}
-                coords = feat.get("geometry", {}).get("coordinates", [None, None])
-                if coords[0] is None or coords[1] is None:
-                    continue
-                fields = [
-                    props.get("name"), props.get("city"), props.get("district"),
-                    props.get("county"), props.get("state"), props.get("country"),
-                ]
-                label = ", ".join([
-                    x for x in (
-                        props.get("name"), props.get("city"),
-                        props.get("state"), props.get("country")
-                    ) if x
-                ])
-                score = _score(label, fields, props.get("osm_value", ""))
-                if score >= 4:
-                    candidates.append((score, float(coords[1]), float(coords[0])))
-        except Exception as exc:
-            logging.exception("Photon: ricerca del Comune %s non riuscita", comune)
-            issues.append(f"Photon: {type(exc).__name__}: {exc}")
+            lat = float(r["coordinate.lat"])
+            lon = float(r["coordinate.lng"])
+            if not (35 <= lat <= 48.5 and 6 <= lon <= 20):
+                continue
+        except (ValueError, TypeError):
+            continue
+        name = (r.get("nome") or "").strip()
+        other = (r.get("nomeAltraLingua") or "").strip()
+        region = (r.get("regione.nome") or "").strip()
+        province = (r.get("provincia.nome") or "").strip()
+        sigla = (r.get("provincia.sigla") or "").strip()
+        comuni.append({
+            "nome": name, "regione": region, "provincia": province,
+            "sigla": sigla, "lat": lat, "lon": lon,
+            "nome_norm": _normalize_comune(name),
+            "nome_alt_norm": _normalize_comune(other),
+            "regione_norm": _normalize_comune(region),
+            "provincia_norm": _normalize_comune(province),
+            "sigla_norm": _normalize_comune(sigla),
+        })
+    if len(comuni) < min_count:
+        raise ValueError("Archivio comunale assente, incompleto o non leggibile.")
+    return tuple(comuni)
 
-    # Eccezioni non memorizzate da st.cache_data: dopo un guasto di rete,
-    # l'utente può riprovare subito, senza attendere 24 ore.
-    if not candidates:
-        if issues:
-            raise RuntimeError(" / ".join(issues))
-        raise LookupError(
-            f"Nessun risultato geografico compatibile con {comune}, "
-            f"{provincia or regione or 'Italia'}."
+
+@st.cache_data(show_spinner=False)
+def _load_comuni() -> tuple[dict, ...]:
+    """Non usa servizi di geocodifica: solo archivio locale o copia statica."""
+    app_dir = Path(__file__).resolve().parent
+    for csv_name in ("comuni.csv", "comuni_italiani.csv"):
+        dataset = app_dir / csv_name
+        if dataset.is_file():
+            return _parse_comuni_csv(dataset.read_text(encoding="utf-8-sig"))
+
+    # Recupero temporaneo: utile durante l'aggiornamento del repository.
+    # Per indipendenza dalla rete inserire il CSV locale, come da istruzioni.
+    for url in (COMUNI_CSV_URL, COMUNI_MIRROR_URL):
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "GiulivoIngegneria-GeneratoreSpettri/2.0"},
+            )
+            with urllib.request.urlopen(req, timeout=16) as response:
+                body = response.read(3_000_001)
+            if len(body) > 3_000_000:
+                raise ValueError("Archivio Comuni troppo grande.")
+            return _parse_comuni_csv(body.decode("utf-8-sig"))
+        except Exception:
+            logging.exception("Download archivio statico comuni non riuscito")
+    raise RuntimeError("Archivio Comuni non disponibile. Utilizza temporaneamente le coordinate WGS84.")
+
+
+def find_municipality(comune: str, provincia: str = "", regione: str = "") -> dict:
+    """Risultato esatto; mai attribuire coordinate di un Comune diverso."""
+    query = _normalize_comune(comune)
+    if not query:
+        raise LookupError("Inserisci il nome del Comune.")
+    all_comuni = _load_comuni()
+    matches = [c for c in all_comuni
+               if query in (c["nome_norm"], c["nome_alt_norm"])]
+    if not matches:
+        suggestions = difflib.get_close_matches(
+            query, [c["nome_norm"] for c in all_comuni], n=3, cutoff=0.78
         )
+        proposed = [c["nome"] for c in all_comuni if c["nome_norm"] in suggestions][:3]
+        extra = " Forse cercavi: " + ", ".join(proposed) + "." if proposed else ""
+        raise LookupError("Comune non trovato nell'archivio." + extra)
 
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    return candidates[0][1], candidates[0][2]
+    p = _normalize_comune(provincia)
+    r = _normalize_comune(regione)
+    if p:
+        narrowed = [c for c in matches if p in (c["provincia_norm"], c["sigla_norm"])]
+        if narrowed:
+            matches = narrowed
+        else:
+            raise LookupError(
+                f"'{comune}' non appartiene alla provincia '{provincia}'. "
+                "Verifica la provincia o lasciala vuota."
+            )
+    if r:
+        narrowed = [c for c in matches if c["regione_norm"] == r]
+        if narrowed:
+            matches = narrowed
+        # Se la Regione proposta è quella del sito precedente, e c'è una sola
+        # corrispondenza nazionale, si risolve e si aggiorna la Regione corretta.
+        elif len(matches) != 1:
+            raise LookupError(
+                f"Il Comune '{comune}' non è compatibile con la Regione '{regione}'. "
+                "Controlla Regione e Provincia."
+            )
+
+    if len(matches) > 1:
+        choices = ", ".join(
+            f"{c['nome']} ({c['sigla']}, {c['regione']})" for c in matches[:7]
+        )
+        raise LookupError("Nome presente in più Comuni. Indica Provincia/Regione: " + choices)
+    return matches[0]
+
+
+def geocode_municipality(comune: str, provincia: str = "", regione: str = ""):
+    """Compatibilità con le precedenti chiamate: ritorna (lat, lon)."""
+    item = find_municipality(comune, provincia, regione)
+    return item["lat"], item["lon"]
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -595,8 +587,8 @@ with left:
     selected_municipality = st.session_state.get("municipality_name", "")
 
     if use_municipality:
-        st.caption("Ricerca diretta del Comune: non è più necessario scaricare l'intero elenco ISTAT prima di usare l'app.")
-        st.caption("Coordinate comunali indicative · dati geografici © OpenStreetMap contributors (Nominatim/Photon).")
+        st.caption("Ricerca dei Comuni su archivio statico: nessuna richiesta a Nominatim o Photon.")
+        st.caption("Coordinate comunali indicative · [dati RP92 (ISTAT + Garda Informatica)](https://github.com/RP92/comuni-italiani), [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Per il progetto inserire le coordinate esatte del sito.")
         comune_q = st.text_input("Comune", value=st.session_state.get("municipality_name", ""), placeholder="es. Napoli")
         qm1, qm2 = st.columns(2)
         with qm1:
@@ -612,22 +604,23 @@ with left:
             else:
                 try:
                     with st.spinner(f"Ricerca coordinate di {comune_q.strip()}…"):
-                        coords = geocode_municipality(
+                        municipal_record = find_municipality(
                             comune_q.strip(), provincia_q.strip(), regione_q.strip()
                         )
                 except LookupError as exc:
                     st.error(f"Comune non trovato: {exc}")
                     st.caption("Controlla Comune, Provincia e Regione o inserisci le coordinate WGS84 del sito.")
                 except Exception as exc:
-                    st.error("Il servizio di ricerca geografica non è disponibile al momento.")
-                    st.caption(f"Dettaglio diagnostico: {exc}")
+                    logging.exception("Ricerca archivio Comuni non disponibile")
+                    st.error("Archivio Comuni temporaneamente non disponibile. Inserisci le coordinate WGS84 del sito.")
                 else:
+                    coords = municipal_record["lat"], municipal_record["lon"]
                     st.session_state["lat_wgs"], st.session_state["lon_wgs"] = coords
                     st.session_state["lat_wgs_input"], st.session_state["lon_wgs_input"] = coords
-                    st.session_state["site_name"] = comune_q.strip()
-                    st.session_state["site_name_input"] = comune_q.strip()
-                    st.session_state["region_name"] = regione_q.strip()
-                    st.session_state["municipality_name"] = comune_q.strip()
+                    st.session_state["site_name"] = municipal_record["nome"]
+                    st.session_state["site_name_input"] = municipal_record["nome"]
+                    st.session_state["region_name"] = municipal_record["regione"]
+                    st.session_state["municipality_name"] = municipal_record["nome"]
                     st.rerun()
 
     c1, c2 = st.columns(2)
