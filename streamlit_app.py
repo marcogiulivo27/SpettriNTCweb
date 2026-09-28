@@ -587,8 +587,6 @@ with left:
     selected_municipality = st.session_state.get("municipality_name", "")
 
     if use_municipality:
-        st.caption("Ricerca dei Comuni su archivio statico: nessuna richiesta a Nominatim o Photon.")
-        st.caption("Coordinate comunali indicative · [dati RP92 (ISTAT + Garda Informatica)](https://github.com/RP92/comuni-italiani), [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Per il progetto inserire le coordinate esatte del sito.")
         comune_q = st.text_input("Comune", value=st.session_state.get("municipality_name", ""), placeholder="es. Napoli")
         qm1, qm2 = st.columns(2)
         with qm1:
@@ -622,6 +620,13 @@ with left:
                     st.session_state["region_name"] = municipal_record["regione"]
                     st.session_state["municipality_name"] = municipal_record["nome"]
                     st.rerun()
+
+        st.caption(
+            "Dati comunali: [RP92](https://github.com/RP92/comuni-italiani) "
+            "(ISTAT / Garda Informatica) · "
+            "[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) "
+            "· Coordinate indicative."
+        )
 
     c1, c2 = st.columns(2)
     with c1:
