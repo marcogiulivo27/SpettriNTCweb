@@ -19,7 +19,6 @@ import matplotlib.pyplot as plt
 import matplotlib.tri as mtri
 from matplotlib.patches import Circle
 from matplotlib.colors import ListedColormap, BoundaryNorm
-from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 import numpy as np
 import pandas as pd
 import pydeck as pdk
@@ -419,99 +418,88 @@ def _apply_tnr_style():
 
 
 def combined_hazard_figure(hazard_db, meta, state, tr, radius_km, site_name):
+    """Carta nazionale e zoom AFFIANCATI; nessun inset sovrapposto alla Sardegna."""
+    from matplotlib.patches import Polygon
+    from matplotlib.cm import ScalarMappable
+
     n_lon, n_lat, n_ag, nsource = hazard_db.national_hazard_points(tr)
     l_lon, l_lat, l_ag, lsource = hazard_db.hazard_points(
-        meta["lat_ed50"],
-        meta["lon_ed50"],
-        tr,
-        radius_km=radius_km,
-        table2_group=meta["table2_group"],
-    )
+        meta["lat_ed50"], meta["lon_ed50"], tr,
+        radius_km=radius_km, table2_group=meta["table2_group"])
 
-    # Palette ispirata alle mappe INGV
-    levels = np.array([0.025, 0.050, 0.075, 0.100, 0.125, 0.150, 0.175, 0.200, 0.225, 0.250, 0.275, 0.300])
-    colors = [
-        "#d7d7d7",  # grigio
-        "#c7e6f2",  # azzurro chiaro
-        "#8fd0e8",  # azzurro
-        "#72c768",  # verde
-        "#b7df78",  # verde chiaro
-        "#f0dd57",  # giallo
-        "#f5bf4b",  # giallo-arancio
-        "#ef8a34",  # arancio
-        "#ea4d2e",  # rosso-arancio
-        "#d61f27",  # rosso
-        "#8d61c2",  # viola
-    ]
-    cmap = ListedColormap(colors)
-    cmap.set_under("#efefef")
-    cmap.set_over("#7b49b2")
+    levels = np.array([.025, .050, .075, .100, .125, .150, .175, .200,
+                       .225, .250, .275, .300])
+    cmap = ListedColormap(["#d9d9d9", "#c7e8f2", "#94d3e6", "#7dcf9f", "#a4d66a",
+                           "#e1df67", "#f8cb67", "#f6aa42", "#ee7635", "#df402f", "#ad3e8c"])
+    cmap.set_under("#f2f2f2")
+    cmap.set_over("#7a51af")
     norm = BoundaryNorm(levels, cmap.N)
 
+    # Poligoni geografici: soli dati cartografici, senza alcuna funzione PRO.
+    outline_file = Path(__file__).resolve().parent / "data" / "italy_outline.json"
+    with outline_file.open(encoding="utf-8") as f:
+        raw_outlines = json.load(f)
+    outlines = []
+    for points in raw_outlines.get("polygons", []):
+        points = np.asarray(points, dtype=float)
+        x, y = WGS84_TO_ED50.transform(points[:, 0], points[:, 1])
+        outlines.append(np.column_stack([x, y]))
+    sardinia = [p for p in outlines if 7.5 < (p[:, 0].min()+p[:, 0].max())/2 < 10.5
+                and 38.4 < (p[:, 1].min()+p[:, 1].max())/2 < 42.0]
+    if not sardinia:
+        raise RuntimeError("Manca il contorno della Sardegna in data/italy_outline.json")
+    sardinia = max(sardinia, key=lambda p: np.ptp(p[:, 0])*np.ptp(p[:, 1]))
+    sard_ag = hazard_db._table2_values(float(tr), "G1")[0] / 10.0
+    site_x = float(meta["lon_ed50"])
+    site_y = float(meta["lat_ed50"])
+    dlat = float(radius_km)/111.0
+    dlon = float(radius_km)/max(35., 111.*np.cos(np.radians(site_y)))
+
     with _apply_tnr_style():
-        fig = plt.figure(figsize=(11.0, 8.6), facecolor="white")
-        ax = fig.add_axes([0.08, 0.12, 0.64, 0.80])
-        ax.set_facecolor("#fbfbf8")
+        fig = plt.figure(figsize=(12.5, 6.8), facecolor="white")
+        # I due assi hanno regioni separate anche quando la finestra è piccola.
+        ax = fig.add_axes([.055, .14, .52, .76])
+        axins = fig.add_axes([.640, .23, .245, .55])
+        cax = fig.add_axes([.928, .24, .022, .52])
+        for a in (ax, axins):
+            a.set_facecolor("#fbfbf8")
+            a.grid(True, color="#7f7f7f", alpha=.12, lw=.35)
+            a.tick_params(labelsize=8)
 
-        triang = _masked_triangulation(n_lon, n_lat, max_edge_deg=0.85)
-        cf = ax.tricontourf(triang, n_ag, levels=levels, cmap=cmap, norm=norm, extend="both")
-        try:
-            ax.tricontour(triang, n_ag, levels=levels, colors="#555555", linewidths=0.45, alpha=0.55)
-        except Exception:
-            pass
+        triang = _masked_triangulation(n_lon, n_lat, max_edge_deg=.85)
+        ax.tricontourf(triang, n_ag, levels=levels, cmap=cmap, norm=norm, extend="both")
+        if len(l_ag) >= 4 and float(np.nanmax(l_ag)-np.nanmin(l_ag)) > 1e-10:
+            local_tri = _masked_triangulation(l_lon, l_lat, max_edge_deg=.85)
+            axins.tricontourf(local_tri, l_ag, levels=levels, cmap=cmap, norm=norm, extend="both")
+        elif len(l_ag):
+            axins.scatter(l_lon, l_lat, c=l_ag, cmap=cmap, norm=norm, s=25)
 
-        site_x = float(meta["lon_ed50"])
-        site_y = float(meta["lat_ed50"])
-        dlat = float(radius_km) / 111.0
-        dlon = float(radius_km) / max(20.0, 111.0 * np.cos(np.radians(site_y)))
-        rdeg = max(dlat, dlon) * 0.70
+        for a in (ax, axins):
+            a.add_patch(Polygon(sardinia, closed=True, facecolor=cmap(norm(sard_ag)),
+                                edgecolor="#222222", linewidth=1.0, zorder=10))
+            for poly in outlines:
+                a.plot(poly[:, 0], poly[:, 1], lw=.65, color="#4b5563", zorder=11)
+            a.scatter([site_x], [site_y], marker="*", s=155, c="white",
+                      edgecolors="black", linewidths=1.0, zorder=15)
 
-        ax.scatter([site_x], [site_y], marker="*", s=190, c="white", edgecolors="black", linewidths=1.0, zorder=15)
-        ax.add_patch(Circle((site_x, site_y), radius=rdeg, fill=False, ec="#222222", lw=1.2, ls="--", zorder=12))
-        ax.text(site_x + 0.10, site_y + 0.12, (site_name or "Sito"), fontsize=10.0, fontweight="bold", color="black", zorder=16)
-
-        ax.set_xlim(6.2, 19.2)
-        ax.set_ylim(35.0, 47.7)
-        ax.set_aspect("equal", adjustable="box")
-        ax.set_xlabel("Longitudine ED50 [°]", fontweight="bold", labelpad=6)
-        ax.set_ylabel("Latitudine ED50 [°]", fontweight="bold", labelpad=8)
-        ax.grid(True, color="#7f7f7f", alpha=0.12, linewidth=0.35)
-        ax.set_title(
-            f"Pericolosità sismica in Italia - {state}  |  TR = {tr:.0f} anni",
-            fontweight="bold",
-            pad=12,
-        )
-
-        # Zoom locale: inset pulito, senza etichette assi che interferiscono
-        axins = inset_axes(ax, width="34%", height="36%", loc="lower left", borderpad=1.2)
-        axins.set_facecolor("white")
-        if len(l_ag) >= 4 and np.nanmax(l_ag) - np.nanmin(l_ag) > 1e-10:
-            local_triang = mtri.Triangulation(l_lon, l_lat)
-            axins.tricontourf(local_triang, l_ag, levels=levels, cmap=cmap, norm=norm, extend="both")
-            try:
-                axins.tricontour(local_triang, l_ag, levels=levels, colors="#555555", linewidths=0.35, alpha=0.50)
-            except Exception:
-                pass
-        else:
-            axins.scatter(l_lon, l_lat, c=l_ag, cmap=cmap, norm=norm, s=26)
-        axins.scatter([site_x], [site_y], marker="*", s=110, c="white", edgecolors="black", linewidths=0.9, zorder=10)
-        axins.set_xlim(site_x - dlon, site_x + dlon)
-        axins.set_ylim(site_y - dlat, site_y + dlat)
-        axins.set_title("Zoom locale", fontsize=10.5, fontweight="bold", pad=4)
-        axins.grid(True, color="#7f7f7f", alpha=0.12, linewidth=0.30)
-        axins.set_xticks([])
-        axins.set_yticks([])
-        axins.tick_params(bottom=False, left=False, labelbottom=False, labelleft=False)
-        for spine in axins.spines.values():
-            spine.set_linewidth(1.1)
-            spine.set_color("#222222")
-
-        cax = fig.add_axes([0.77, 0.24, 0.024, 0.56])
-        cb = fig.colorbar(cf, cax=cax, ticks=levels[:-1])
+        ax.set_xlim(6.1, 19.2)
+        ax.set_ylim(35.2, 47.6)
+        axins.set_xlim(site_x-dlon, site_x+dlon)
+        axins.set_ylim(site_y-dlat, site_y+dlat)
+        ax.set_aspect(1/max(.3, np.cos(np.radians(41.5))))
+        axins.set_aspect(1/max(.3, np.cos(np.radians(site_y))))
+        ax.set_title(f"Pericolosità sismica in Italia - {state} | TR = {tr:.0f} anni",
+                     fontweight="bold", fontsize=12)
+        axins.set_title("Zoom locale", fontweight="bold", fontsize=11)
+        ax.set_xlabel("Longitudine ED50 [°]", fontweight="bold")
+        ax.set_ylabel("Latitudine ED50 [°]", fontweight="bold")
+        axins.set_xlabel("Longitudine ED50 [°]", fontsize=9)
+        axins.set_ylabel("Latitudine ED50 [°]", fontsize=9)
+        cb = fig.colorbar(ScalarMappable(cmap=cmap, norm=norm), cax=cax,
+                          ticks=levels[::2], extend="both")
         cb.set_label("ag / g", fontweight="bold")
-        cb.ax.tick_params(labelsize=9)
-
-        # Nessun box testuale aggiuntivo: la sola colorbar resta pulita e leggibile
+        fig.text(.055, .055, f"Sardegna: Tabella 2 NTC, G1 | ag = {sard_ag:.4f} g. "
+                 "Distribuzione uniforme solo a fini grafici.", fontsize=9)
         return fig, nsource, lsource
 
 
@@ -564,7 +552,7 @@ logo_path = resource_path("logo.png")
 head1, head2 = st.columns([3.2, 1.8], gap="large", vertical_alignment="center")
 with head1:
     st.title("Generatore di spettri di risposta sismica")
-    st.caption("SLO · SLD · SLV · SLC — versione web")
+    st.caption("SLO · SLD · SLV · SLC — versione web | FREE MAP 4.0")
 with head2:
     if Path(logo_path).exists():
         encoded_logo = base64.b64encode(Path(logo_path).read_bytes()).decode("ascii")
