@@ -584,7 +584,7 @@ with left:
         with qm2:
             provincia_q = st.text_input("Provincia (facoltativa)", placeholder="es. Napoli")
 
-        if st.button("Trova Comune", use_container_width=True):
+        if st.button("Trova Comune", width="stretch"):
             if not comune_q.strip():
                 st.warning("Inserisci il nome del Comune.")
             else:
@@ -622,7 +622,6 @@ with left:
             "Latitudine WGS84",
             min_value=34.0,
             max_value=48.5,
-            value=float(st.session_state["lat_wgs_input"]),
             format="%.8f",
             key="lat_wgs_input",
         )
@@ -631,7 +630,6 @@ with left:
             "Longitudine WGS84",
             min_value=5.0,
             max_value=20.5,
-            value=float(st.session_state["lon_wgs_input"]),
             format="%.8f",
             key="lon_wgs_input",
         )
@@ -703,7 +701,7 @@ with left:
         key=editor_key,
         hide_index=True,
         disabled=["SL"],
-        use_container_width=True,
+        width="stretch",
         column_config={
             "Tr [anni]": st.column_config.NumberColumn(format="%.0f"),
             "ag/g": st.column_config.NumberColumn(format="%.4f"),
@@ -733,7 +731,7 @@ with right:
 
     with tabs[0]:
         fig = spectra_figure(results, plot_type, highlight, site_name, soil, topo, xi, q)
-        st.pyplot(fig, use_container_width=True)
+        st.pyplot(fig, width="stretch")
 
         table = results_table(results)
         st.dataframe(
@@ -743,7 +741,7 @@ with right:
                 "Se(0) [g]": "{:.4f}", "Plateau [g]": "{:.4f}",
             }),
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
         )
 
         png = io.BytesIO()
@@ -754,14 +752,14 @@ with right:
             data=png.getvalue(),
             file_name="spettri_sismici.png",
             mime="image/png",
-            use_container_width=True,
+            width="stretch",
         )
         d2.download_button(
             "Scarica risultati CSV",
             data=csv_bytes(results),
             file_name="parametri_spettrali.csv",
             mime="text/csv",
-            use_container_width=True,
+            width="stretch",
         )
         plt.close(fig)
 
@@ -824,7 +822,7 @@ with right:
             layers=[halo_layer, site_layer, label_layer],
             tooltip={"text": "{sito}\nLat: {lat}\nLon: {lon}"},
         )
-        st.pydeck_chart(deck, use_container_width=True, height=520)
+        st.pydeck_chart(deck, width="stretch", height=520)
 
         m1, m2, m3 = st.columns([1, 1, 1.4])
         encoded = urllib.parse.quote(f"{lat_wgs:.8f},{lon_wgs:.8f}")
@@ -832,13 +830,13 @@ with right:
             st.link_button(
                 "Google Maps",
                 f"https://www.google.com/maps/search/?api=1&query={encoded}",
-                use_container_width=True,
+                width="stretch",
             )
         with m2:
             st.link_button(
                 "Google Earth",
                 f"https://earth.google.com/web/search/{encoded}",
-                use_container_width=True,
+                width="stretch",
             )
         with m3:
             st.caption(f"WGS84: {lat_wgs:.7f}, {lon_wgs:.7f}")
@@ -858,7 +856,7 @@ with right:
             hfig, nsource, lsource = combined_hazard_figure(
                 hazard_db, meta, hazard_state, tr_for_map, radius, site_name
             )
-            st.pyplot(hfig, use_container_width=True)
+            st.pyplot(hfig, width="stretch")
             plt.close(hfig)
             st.caption(
                 f"Mappa di pericolosità in stile tecnico con palette cromatica ispirata alle tavole INGV. Il cerchio sulla carta nazionale individua l'area rappresentata nello zoom locale."

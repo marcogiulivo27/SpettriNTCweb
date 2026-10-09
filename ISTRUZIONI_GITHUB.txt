@@ -1,0 +1,9 @@
+SpettriNTC FREE - compatibilita Streamlit
+
+1. Sostituisci SOLO streamlit_app.py nella radice del repository marcogiulivo27/SpettriNTCweb (branch main).
+2. Lascia invariati spettri_core.py, data e l'interfaccia; data/italy_outline.json e' incluso nello ZIP solo per eventuale recupero.
+3. Verifica il Main file path = streamlit_app.py su Streamlit Cloud.
+
+Cambi: rimosso il valore duplicato per due widget gia' inizializzati in session_state; migrato use_container_width=True a width="stretch".
+La sospensione dopo inattivita' in Streamlit Community Cloud non puo' essere disattivata dal codice. I log non provano la causa dei reboot periodici.
+Se l'app si blocca, raccogli i log e uno screenshot PRIMA del Reboot.
